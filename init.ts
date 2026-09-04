@@ -141,7 +141,11 @@ export async function initializeMcp(
   const config = options.config !== undefined
     ? resolveConfiguredClaudePluginMcp(cloneMcpConfig(options.config), cwd)
     : loadMcpConfig(configPath, cwd);
-  const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
+  const authStorageOptions = getAuthStorageOptions(
+    config.settings?.oauthDir,
+    cwd,
+    config.settings?.oauthCredentialStore,
+  );
 
   const ownsOAuthRuntime = options.oauthRuntime === undefined;
   const oauthRuntime = options.oauthRuntime ?? createOAuthRuntime(owner.signal);
@@ -225,6 +229,7 @@ export async function initializeMcp(
     sendMessage: (message, options) => {
       const deliver = () => {
         if (!owner.isActive()) return;
+        // SAFETY: McpExtensionState.sendMessage mirrors Pi's custom message shape; the public types differ only by package boundary.
         pi.sendMessage(message as unknown as Parameters<typeof pi.sendMessage>[0], options);
       };
       if (!options?.triggerTurn) {

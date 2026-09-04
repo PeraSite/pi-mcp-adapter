@@ -1,8 +1,8 @@
+import type { Model } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ExtensionAPI,
   ExtensionContext,
-  ExtensionMode,
   ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 
@@ -28,7 +28,7 @@ vi.mock("../server-manager.ts", () => ({
   }),
 }));
 
-function context(overrides: { hasUI?: boolean; mode?: ExtensionMode } = {}): ExtensionContext {
+function context(overrides: { hasUI?: boolean; mode?: ExtensionContext["mode"] } = {}): ExtensionContext {
   return {
     cwd: "/tmp/project",
     hasUI: true,
@@ -44,6 +44,19 @@ function context(overrides: { hasUI?: boolean; mode?: ExtensionMode } = {}): Ext
 function extensionApi(): ExtensionAPI {
   return { getFlag: vi.fn() } as unknown as ExtensionAPI;
 }
+
+const model = {
+  provider: "anthropic",
+  id: "test",
+  api: "anthropic-messages",
+  name: "Test",
+  baseUrl: "https://example.com",
+  input: ["text"],
+  reasoning: false,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 1_000,
+  maxTokens: 100,
+} satisfies Model<"anthropic-messages">;
 
 describe("initializeMcp elicitation config", () => {
   beforeEach(() => {
@@ -94,6 +107,21 @@ describe("initializeMcp elicitation config", () => {
     });
   });
 
+  it("passes the explicit file credential store to the server manager", async () => {
+    mocks.loadMcpConfig.mockReturnValue({
+      mcpServers: {},
+      settings: { oauthCredentialStore: "file" },
+    });
+    const { initializeMcp } = await import("../init.ts");
+
+    await initializeMcp(extensionApi(), context());
+
+    expect(mocks.managers[0].setAuthStorageOptions).toHaveBeenCalledWith({
+      credentialStore: "file",
+      baseDir: expect.stringMatching(/mcp-oauth$/),
+    });
+  });
+
   it("keeps RPC elicitation form-only so the backend never opens a browser", async () => {
     const { initializeMcp } = await import("../init.ts");
     const ctx = context({ mode: "rpc" });
@@ -111,15 +139,15 @@ describe("initializeMcp elicitation config", () => {
     const ctx = context() as ExtensionContext & { model: unknown; signal: AbortSignal | undefined };
     const firstSignal = new AbortController();
     const secondSignal = new AbortController();
-    ctx.model = { id: "first" };
+    ctx.model = { ...model, id: "first" };
     ctx.signal = firstSignal.signal;
 
     const state = await initializeMcp(extensionApi(), ctx);
     const sampling = mocks.managers[0].setSamplingConfig.mock.calls[0][0];
 
-    ctx.model = { id: "second" };
+    ctx.model = { ...model, id: "second" };
     ctx.signal = secondSignal.signal;
-    expect(sampling.getCurrentModel()).toEqual({ id: "second" });
+    expect(sampling.getCurrentModel()).toMatchObject({ id: "second" });
     const activeSignal = sampling.getSignal();
     expect(activeSignal.aborted).toBe(false);
     secondSignal.abort(new Error("turn cancelled"));

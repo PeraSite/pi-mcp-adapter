@@ -4,16 +4,16 @@
  * Handles secure storage of OAuth credentials, tokens, client information,
  * and legacy PKCE state for MCP servers.
  *
- * Persistent OAuth entries are stored in the operating system credential store.
+ * Persistent OAuth entries use the operating system credential store by default.
+ * Headless installations can explicitly opt into a permission-restricted file store.
  * Legacy plaintext entries are imported from $MCP_OAUTH_DIR/sha256-<server-hash>/tokens.json
- * when set, otherwise <Pi agent dir>/mcp-oauth/sha256-<server-hash>/tokens.json,
- * then the plaintext file is removed.
+ * when set, otherwise <Pi agent dir>/mcp-oauth/sha256-<server-hash>/tokens.json.
  */
 
 import { spawnSync } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { createRequire } from 'module';
-import { readFileSync, existsSync, rmSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { getAgentPath } from './agent-dir.ts';
@@ -80,8 +80,10 @@ export interface AuthEntry {
 }
 
 export interface AuthStorageOptions {
-  /** Legacy plaintext import directory. Persistent secrets no longer use this as their store. */
+  /** Legacy import directory, or the active directory when credentialStore is file. */
   baseDir?: string;
+  /** Persistent credential backend. Defaults to the operating system keyring. */
+  credentialStore?: 'keyring' | 'file';
 }
 
 export class OAuthCredentialStoreError extends Error {
@@ -118,6 +120,9 @@ function causeChainContains(error: unknown, pattern: RegExp): boolean {
 }
 
 export function formatOAuthCredentialStoreUnavailable(error: OAuthCredentialStoreError): string {
+  if (causeChainContains(error, /file credential store/i)) {
+    return 'OAuth file credential store unavailable. Check its directory ownership and permissions, then retry.';
+  }
   if (process.platform === 'linux' && causeChainContains(error, /key\s*(?:has been\s*)?revoked|keyrevoked/i)) {
     return 'OAuth credential store unavailable: the Linux session keyring may be revoked. Start Pi from a fresh login/keyring session and retry.';
   }
@@ -408,8 +413,18 @@ export function loadTestKeyringEntryClass(keyringRequire: KeyringRequire, platfo
   return loadKeyringEntryClass(keyringRequire, platform, arch);
 }
 
-export function getAuthStorageOptions(oauthDir: unknown, cwd = process.cwd()): AuthStorageOptions {
+export function getAuthStorageOptions(
+  oauthDir: unknown,
+  cwd = process.cwd(),
+  credentialStore?: unknown,
+): AuthStorageOptions {
+  if (credentialStore !== undefined && credentialStore !== 'keyring' && credentialStore !== 'file') {
+    throw new Error('settings.oauthCredentialStore must be "keyring" or "file"');
+  }
   const baseDir = resolveConfiguredOAuthDir(oauthDir, cwd);
+  if (credentialStore === 'file') {
+    return { credentialStore, baseDir: baseDir ?? getAgentPath('mcp-oauth') };
+  }
   return baseDir ? { baseDir } : {};
 }
 
@@ -444,9 +459,12 @@ export function getAuthEntryFilePath(serverName: string, options?: AuthStorageOp
   return join(getServerDir(serverName, options), 'tokens.json');
 }
 
-function parseJsonPayload(serverName: string, payload: string, source: string): unknown {
+function parseJsonPayload(serverName: string, payload: string, source: string): Record<string, unknown> {
   try {
-    return JSON.parse(payload) as unknown;
+    const parsed = JSON.parse(payload) as unknown;
+    const record = toRecord(parsed);
+    if (record) return record;
+    throw new Error('expected a JSON object');
   } catch (error) {
     throw new Error(`Failed to parse OAuth credentials for ${serverName} from ${source}`, { cause: error });
   }
@@ -623,6 +641,63 @@ function readChunkedAuthEntry(store: AuthSecretStore, serverName: string, accoun
   return parseAuthEntryPayload(serverName, chunks.join(''), 'OS secure credential store chunks');
 }
 
+function getAuthEntryCacheKey(serverName: string, options?: AuthStorageOptions): string {
+  return JSON.stringify([
+    options?.credentialStore ?? 'keyring',
+    options?.credentialStore === 'file' ? getAuthBaseDir(options) : '',
+    serverName,
+  ]);
+}
+
+function readFileAuthEntry(serverName: string, options: AuthStorageOptions): AuthEntry | undefined {
+  const filePath = getAuthEntryFilePath(serverName, options);
+  if (!existsSync(filePath)) return undefined;
+  try {
+    return parseAuthEntryPayload(serverName, readFileSync(filePath, 'utf8'), filePath);
+  } catch (error) {
+    throw new OAuthCredentialStoreError(
+      `Failed to read OAuth credentials for ${serverName} from the file credential store`,
+      'read',
+      error,
+    );
+  }
+}
+
+function writeFileAuthEntry(serverName: string, entry: AuthEntry, options: AuthStorageOptions): void {
+  const directory = getServerDir(serverName, options);
+  const filePath = getAuthEntryFilePath(serverName, options);
+  const temporaryPath = `${filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  const payload = JSON.stringify(entry);
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(directory, 0o700);
+    writeFileSync(temporaryPath, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    renameSync(temporaryPath, filePath);
+    if (process.platform !== 'win32') chmodSync(filePath, 0o600);
+  } catch (error) {
+    rmSync(temporaryPath, { force: true });
+    throw new OAuthCredentialStoreError(
+      `Failed to write OAuth credentials for ${serverName} to the file credential store`,
+      'write',
+      error,
+    );
+  }
+  publishAuthEntryToCache(serverName, payload, options);
+}
+
+function removeFileAuthEntry(serverName: string, options: AuthStorageOptions): void {
+  try {
+    rmSync(getAuthEntryFilePath(serverName, options), { force: true });
+    rmSync(getServerDir(serverName, options), { recursive: true, force: true });
+  } catch (error) {
+    throw new OAuthCredentialStoreError(
+      `Failed to remove OAuth credentials for ${serverName} from the file credential store`,
+      'remove',
+      error,
+    );
+  }
+}
+
 function readLegacyAuthEntry(serverName: string, options?: AuthStorageOptions): AuthEntry | undefined {
   const filePath = getAuthEntryFilePath(serverName, options);
   if (!existsSync(filePath)) return undefined;
@@ -679,15 +754,14 @@ function writeSecureAuthEntryToStore(store: AuthSecretStore, serverName: string,
   publishAuthEntryToCache(serverName, payload);
 }
 
-function publishAuthEntryToCache(serverName: string, payload: string): void {
+function publishAuthEntryToCache(serverName: string, payload: string, options?: AuthStorageOptions): void {
   if (!isAuthEntryCacheEnabled()) return;
+  const cacheKey = getAuthEntryCacheKey(serverName, options);
   // Cache the same normalized shape a fresh persistent-store read returns.
-  const normalized = toAuthEntry(JSON.parse(payload) as unknown);
-  if (!normalized) {
-    authEntryCache.delete(serverName);
-    return;
-  }
-  authEntryCache.set(serverName, cloneAuthEntry(normalized));
+  authEntryCache.set(
+    cacheKey,
+    cloneAuthEntry(parseAuthEntryPayload(serverName, payload, 'credential cache')),
+  );
 }
 
 function writeSecureAuthEntry(serverName: string, entry: AuthEntry): void {
@@ -746,19 +820,24 @@ function readAuthEntry(
   // Status-only reads deliberately bypass the cache because they do not
   // migrate legacy entries.
   const cacheable = behavior.migrateLegacy !== false && isAuthEntryCacheEnabled();
-  if (cacheable && authEntryCache.has(serverName)) {
-    return cloneAuthEntry(authEntryCache.get(serverName));
+  const cacheKey = getAuthEntryCacheKey(serverName, options);
+  if (cacheable && authEntryCache.has(cacheKey)) {
+    return cloneAuthEntry(authEntryCache.get(cacheKey));
   }
 
   let entry: AuthEntry | undefined;
-  try {
-    entry = readAuthEntryFromStore(getAuthSecretStore(), serverName, options, behavior);
-  } catch (error) {
-    if (!shouldAttemptLinuxKeyringRecovery(error)) throw error;
-    entry = readAuthEntryFromStore(linuxKeyringRecoveryAuthSecretStore, serverName, options, behavior);
+  if (options?.credentialStore === 'file') {
+    entry = readFileAuthEntry(serverName, options);
+  } else {
+    try {
+      entry = readAuthEntryFromStore(getAuthSecretStore(), serverName, options, behavior);
+    } catch (error) {
+      if (!shouldAttemptLinuxKeyringRecovery(error)) throw error;
+      entry = readAuthEntryFromStore(linuxKeyringRecoveryAuthSecretStore, serverName, options, behavior);
+    }
   }
 
-  if (cacheable) authEntryCache.set(serverName, cloneAuthEntry(entry));
+  if (cacheable) authEntryCache.set(cacheKey, cloneAuthEntry(entry));
   return entry;
 }
 
@@ -814,6 +893,10 @@ export function saveAuthEntry(serverName: string, entry: AuthEntry, serverUrl?: 
   if (serverUrl) {
     entry.serverUrl = serverUrl;
   }
+  if (options?.credentialStore === 'file') {
+    writeFileAuthEntry(serverName, entry, options);
+    return;
+  }
   writeSecureAuthEntry(serverName, entry);
   removeLegacyAuthEntry(serverName, options);
 }
@@ -838,21 +921,32 @@ function removeAuthEntryFromStore(store: AuthSecretStore, serverName: string): v
 }
 
 export function removeAuthEntry(serverName: string, options?: AuthStorageOptions): void {
-  try {
-    removeAuthEntryFromStore(getAuthSecretStore(), serverName);
-  } catch (error) {
-    if (!shouldAttemptLinuxKeyringRecovery(error)) throw error;
-    removeAuthEntryFromStore(linuxKeyringRecoveryAuthSecretStore, serverName);
+  if (options?.credentialStore === 'file') {
+    removeFileAuthEntry(serverName, options);
+  } else {
+    try {
+      removeAuthEntryFromStore(getAuthSecretStore(), serverName);
+    } catch (error) {
+      if (!shouldAttemptLinuxKeyringRecovery(error)) throw error;
+      removeAuthEntryFromStore(linuxKeyringRecoveryAuthSecretStore, serverName);
+    }
+    removeLegacyAuthEntry(serverName, options);
   }
-  authEntryCache.delete(serverName);
-  removeLegacyAuthEntry(serverName, options);
+  invalidateAuthEntryCache(serverName);
 }
 
 /**
- * Forget a cached entry so the next ordinary read reloads secure storage.
+ * Forget cached entries so the next ordinary read reloads persistent storage.
  */
 export function invalidateAuthEntryCache(serverName: string): void {
-  authEntryCache.delete(serverName);
+  for (const key of authEntryCache.keys()) {
+    try {
+      const parsed = JSON.parse(key) as unknown[];
+      if (parsed[2] === serverName) authEntryCache.delete(key);
+    } catch {
+      authEntryCache.delete(key);
+    }
+  }
 }
 
 /**

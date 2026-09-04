@@ -616,14 +616,14 @@ export interface McpSettings {
    */
   authRequiredMessage?: string;
   /**
-   * Legacy OAuth tokens.json import directory.
-   * Relative paths are resolved from the project root (cwd).
-   * Takes precedence over the agent's mcp-oauth/ legacy import directory but
-   * can still be overridden by the MCP_OAUTH_DIR env variable.
-   *
-   * Persistent OAuth credentials are stored in the operating system credential
-   * store, not this directory. Existing plaintext tokens.json files found here
-   * are imported once and removed.
+   * Persistent OAuth credential backend. Defaults to the operating system keyring.
+   * File storage is opt-in and uses 0700 directories with 0600 credential files.
+   */
+  oauthCredentialStore?: "keyring" | "file";
+  /**
+   * OAuth file directory, resolved from the project root (cwd) and overridden
+   * by MCP_OAUTH_DIR. In keyring mode it is a legacy import source; in file
+   * mode it is the active persistent credential directory.
    */
   oauthDir?: string;
 }

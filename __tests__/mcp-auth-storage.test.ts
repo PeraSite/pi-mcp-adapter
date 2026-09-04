@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -13,6 +13,7 @@ import {
   OAuthCredentialStoreError,
   removeTestAuthSecretStoreEntry,
   resetTestAuthSecretStore,
+  resetAuthEntryCache,
   saveAuthEntry,
 } from "../mcp-auth.ts";
 
@@ -36,6 +37,16 @@ describe("OAuth credential-store diagnostics", () => {
     } else {
       expect(message).toContain("OAuth credential store unavailable");
     }
+  });
+
+  it("reports file-store failures without keyring advice", () => {
+    const error = new OAuthCredentialStoreError(
+      "Failed to read OAuth credentials from the file credential store",
+      "read",
+      new Error("EACCES"),
+    );
+
+    expect(formatOAuthCredentialStoreUnavailable(error)).toContain("directory ownership and permissions");
   });
 });
 
@@ -89,6 +100,52 @@ describe("mcp-auth storage paths", () => {
 
   it("rejects non-string names at the storage boundary", () => {
     expect(() => getAuthEntryFilePath(undefined as unknown as string)).toThrow(/Invalid MCP server name/);
+  });
+
+  it("validates the explicit credential-store setting", () => {
+    expect(getAuthStorageOptions(undefined, process.cwd(), "keyring")).toEqual({});
+    expect(getAuthStorageOptions(undefined, process.cwd(), "file")).toEqual({
+      credentialStore: "file",
+      baseDir: expect.any(String),
+    });
+    expect(() => getAuthStorageOptions(undefined, process.cwd(), "plaintext")).toThrow(
+      /settings\.oauthCredentialStore/,
+    );
+  });
+
+  it("persists explicit file-store credentials with restrictive permissions", () => {
+    delete process.env.MCP_OAUTH_DIR;
+    process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE = "unavailable";
+    const options = getAuthStorageOptions(authDir, process.cwd(), "file");
+    const filePath = getAuthEntryFilePath("headless", options);
+
+    saveAuthEntry("headless", { tokens: { accessToken: "file-token" } }, "https://example.com/mcp", options);
+    resetAuthEntryCache();
+
+    expect(getAuthEntry("headless", options)?.tokens?.accessToken).toBe("file-token");
+    if (process.platform !== "win32") {
+      expect(statSync(dirname(filePath)).mode & 0o777).toBe(0o700);
+      expect(statSync(filePath).mode & 0o777).toBe(0o600);
+    }
+
+    clearAllCredentials("headless", options);
+    expect(existsSync(filePath)).toBe(false);
+  });
+
+  it("isolates file-store caches and files by configured directory", () => {
+    delete process.env.MCP_OAUTH_DIR;
+    const directoryA = mkdtempSync(join(tmpdir(), "pi-mcp-file-store-a-"));
+    const directoryB = mkdtempSync(join(tmpdir(), "pi-mcp-file-store-b-"));
+    const optionsA = getAuthStorageOptions(directoryA, process.cwd(), "file");
+    const optionsB = getAuthStorageOptions(directoryB, process.cwd(), "file");
+
+    saveAuthEntry("same-server", { tokens: { accessToken: "token-a" } }, "https://example.com/mcp", optionsA);
+    saveAuthEntry("same-server", { tokens: { accessToken: "token-b" } }, "https://example.com/mcp", optionsB);
+
+    expect(getAuthEntry("same-server", optionsA)?.tokens?.accessToken).toBe("token-a");
+    expect(getAuthEntry("same-server", optionsB)?.tokens?.accessToken).toBe("token-b");
+    rmSync(directoryA, { recursive: true, force: true });
+    rmSync(directoryB, { recursive: true, force: true });
   });
 
   it("uses configured oauthDir as the legacy import source", () => {
@@ -159,8 +216,10 @@ describe("mcp-auth storage paths", () => {
     const chunkEntries = entries.filter(([account]) => account.includes(".chunk."));
 
     expect(manifestEntry).toBeDefined();
-    const manifest = JSON.parse(manifestEntry![1]) as { __piMcpAdapterOAuthChunked?: number; chunkCount?: number };
+    if (!manifestEntry) throw new Error("Expected chunk manifest");
+    const manifest = JSON.parse(manifestEntry[1]) as { __piMcpAdapterOAuthChunked?: number; chunkCount?: number };
     expect(manifest.__piMcpAdapterOAuthChunked).toBe(1);
+    if (manifest.chunkCount === undefined) throw new Error("Expected chunk count");
     expect(chunkEntries).toHaveLength(manifest.chunkCount);
     expect(chunkEntries.every(([, payload]) => payload.length <= AUTH_SECRET_VALUE_LIMIT)).toBe(true);
   });

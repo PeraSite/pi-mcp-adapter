@@ -311,7 +311,11 @@ export async function authenticateServer(
     }
 
     ui.setStatus("mcp-auth", `Authenticating ${serverName}...`);
-    const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
+    const authStorageOptions = getAuthStorageOptions(
+      config.settings?.oauthDir,
+      cwd,
+      config.settings?.oauthCredentialStore,
+    );
     const status = await authenticate(serverName, serverUrl, definition, {
       ...(authStorageOptions.baseDir ? { authStorageOptions } : {}),
       onAuthorizationUrl: () => {},

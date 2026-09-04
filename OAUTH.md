@@ -20,7 +20,7 @@ The Pi MCP Adapter uses the official MCP SDK's built-in OAuth implementation, wh
 - **Auto-Discovery** - Discovers OAuth endpoints from server metadata
 - **Automatic Token Refresh** - SDK handles expired tokens automatically
 - **State Parameter Validation** - CSRF protection
-- **Secure Token Storage** - Persistent OAuth entries are stored in the operating system credential store
+- **Explicit Token Storage** - OS credential store by default, or opt-in permission-restricted files for headless systems
 
 ## Configuration
 
@@ -228,19 +228,27 @@ A Node.js HTTP server runs on a loopback callback endpoint and handles the activ
 
 ## Token Storage
 
-Persistent OAuth entries are stored per configured server name in the operating system credential store, using macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret through `@napi-rs/keyring`. The stored entry contains tokens, dynamic client information, legacy verifier/state fields when present, and the server URL binding.
+Persistent OAuth entries are stored per configured server name and bound to the configured server URL.
 
-The adapter fails closed when the OS credential store is unavailable. On headless Linux, configure an unlocked Secret Service-compatible keyring before using persistent OAuth; the adapter does not silently fall back to plaintext token files.
+The default `settings.oauthCredentialStore: "keyring"` backend uses macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret through `@napi-rs/keyring`. It fails closed when the OS credential store is unavailable and never silently falls back to files. On Linux, revoked session-keyring errors receive one best-effort retry through `keyctl session - node <packaged helper>`.
 
-On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter makes one best-effort retry through `keyctl session - node <packaged helper>`. This lets explicit re-authentication write fresh credentials from a new session keyring without restarting a long-lived tmux or server process. The recovery path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
+Headless installations can explicitly choose file storage:
 
-Complete credential entries are held in memory for the lifetime of the Pi process on every supported credential-store platform. The MCP SDK reads the access token before every outbound request, so caching avoids a credential-store lookup on each tool call; on Linux this specifically avoids overloading the Secret Service daemon. The cache is filled on the first read for a server and covers both present and absent entries. Authenticating, refreshing, and logging out all update it immediately, so credential changes made through Pi take effect at once. Status-panel inspection deliberately bypasses it and still reads the store directly.
+```json
+{
+  "settings": {
+    "oauthCredentialStore": "file"
+  }
+}
+```
 
-A credential changed or deleted by another process while Pi is running is not observed immediately. The affected server picks it up after the first credential-backed authentication failure in that `needs-auth` episode: Pi discards the cached entry, and the following read reloads from the credential store. Restarting Pi also clears the cache. Set `PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1` to turn the cache off entirely and restore a credential-store read per request.
+File mode stores one compact JSON entry under `~/.pi/agent/mcp-oauth/sha256-<server-hash>/tokens.json`. `settings.oauthDir` or `MCP_OAUTH_DIR` can select another directory. Directories use mode `0700`, files use mode `0600`, and updates use atomic replacement. Files are not encrypted; this matches Pi's `auth.json` permission model and protects against other non-root users, not processes running as the same user or root.
 
-Older versions stored plaintext entries at `~/.pi/agent/mcp-oauth/sha256-<server-hash>/tokens.json`, or under `settings.oauthDir` / `MCP_OAUTH_DIR`. On first read after upgrade, a valid legacy entry is imported into the OS credential store and the plaintext `tokens.json` file is removed. These directories are now legacy import locations, not persistent credential stores or isolation namespaces.
+Complete credential entries are cached in memory for the Pi process lifetime. Authentication, refresh, and logout update the selected backend and cache immediately. Status-panel inspection bypasses the cache, while a credential-backed authentication failure invalidates it so an external change is observed on the next read. Set `PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1` to disable caching.
 
-The stored `serverUrl` field ensures credentials are invalidated if the server URL changes.
+In keyring mode, older plaintext entries under the configured OAuth directory are imported once into the OS credential store and removed. In file mode, that same path remains the active persistent entry and is not migrated or deleted.
+
+The stored `serverUrl` field invalidates credentials if the server URL changes.
 
 ## Security Considerations
 
@@ -260,11 +268,11 @@ For private servers with known-broken metadata, `oauth.skipIssuerMetadataValidat
 
 When an MCP server does not publish usable protected-resource metadata, configure `oauth.authServerMetadataUrl` with the HTTPS URL of its OAuth/OIDC authorization-server metadata document. That document is authoritative instead of MCP protected-resource discovery, and its issuer is still checked by default. Treat this as trusted configuration and point it only at a metadata endpoint you explicitly trust.
 
-### OS Credential Store
+### Credential Stores
 
-Persistent OAuth credentials are written to the OS credential store. Legacy plaintext files are read only for one-way migration and are removed after successful import. On Linux, revoked session-keyring errors can be retried once through a fresh `keyctl session` helper during explicit re-authentication.
+Keyring storage remains the default and fail-closed behavior. File storage requires explicit configuration and never activates as an automatic fallback. Treat a file-backed credential as equivalent to any other user-readable CLI token: keep its parent directory private, exclude it from backups and source control unless those systems are trusted, and rotate it after suspected account compromise.
 
-Credential entries reside in process memory for the lifetime of the Pi process on every supported credential-store platform rather than being re-read per request. They are never written anywhere but the OS credential store, and the process-memory copy is discarded on exit.
+Credential entries reside in process memory for the lifetime of the Pi process rather than being re-read per request. The process-memory copy is discarded on exit.
 
 ### URL Validation
 
@@ -313,7 +321,7 @@ If the browser fails to open (e.g., in SSH sessions), the authorization URL will
 
 The OAuth implementation uses the following modules:
 
-- `mcp-auth.ts` - Auth storage and retrieval through the OS credential store, with one-way legacy `tokens.json` import
+- `mcp-auth.ts` - Auth storage and retrieval through the selected credential backend, with one-way legacy import in keyring mode
 - `mcp-oauth-provider.ts` - SDK OAuthClientProvider implementation
 - `mcp-callback-server.ts` - Node.js HTTP callback server
 - `mcp-auth-flow.ts` - High-level auth flow using SDK transport
