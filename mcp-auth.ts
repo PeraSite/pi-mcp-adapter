@@ -949,6 +949,12 @@ export function invalidateAuthEntryCache(serverName: string): void {
   }
 }
 
+function getLatestAuthEntry(serverName: string, options?: AuthStorageOptions): AuthEntry | undefined {
+  // Another Pi process may have rotated OAuth tokens since this process cached the entry.
+  invalidateAuthEntryCache(serverName);
+  return getAuthEntry(serverName, options);
+}
+
 /**
  * Update tokens for a server.
  */
@@ -958,7 +964,7 @@ export function updateTokens(
   serverUrl?: string,
   options?: AuthStorageOptions
 ): void {
-  const entry = getAuthEntry(serverName, options) ?? {};
+  const entry = getLatestAuthEntry(serverName, options) ?? {};
   if (serverUrl && entry.serverUrl !== serverUrl) {
     delete entry.clientInfo;
     delete entry.codeVerifier;
@@ -977,7 +983,7 @@ export function updateClientInfo(
   serverUrl?: string,
   options?: AuthStorageOptions
 ): void {
-  const entry = getAuthEntry(serverName, options) ?? {};
+  const entry = getLatestAuthEntry(serverName, options) ?? {};
   if (serverUrl && entry.serverUrl !== serverUrl) {
     delete entry.tokens;
     delete entry.codeVerifier;
@@ -991,7 +997,7 @@ export function updateClientInfo(
  * Update code verifier for a server.
  */
 export function updateCodeVerifier(serverName: string, codeVerifier: string, serverUrl?: string, options?: AuthStorageOptions): void {
-  const entry = getAuthEntry(serverName, options) ?? {};
+  const entry = getLatestAuthEntry(serverName, options) ?? {};
   if (serverUrl && entry.serverUrl !== serverUrl) {
     delete entry.tokens;
     delete entry.clientInfo;
@@ -1005,7 +1011,7 @@ export function updateCodeVerifier(serverName: string, codeVerifier: string, ser
  * Clear code verifier for a server.
  */
 export function clearCodeVerifier(serverName: string, options?: AuthStorageOptions): void {
-  const entry = getAuthEntry(serverName, options);
+  const entry = getLatestAuthEntry(serverName, options);
   if (entry) {
     delete entry.codeVerifier;
     saveAuthEntry(serverName, entry, undefined, options);
@@ -1016,7 +1022,7 @@ export function clearCodeVerifier(serverName: string, options?: AuthStorageOptio
  * Update OAuth state for a server.
  */
 export function updateOAuthState(serverName: string, state: string, serverUrl?: string, options?: AuthStorageOptions): void {
-  const entry = getAuthEntry(serverName, options) ?? {};
+  const entry = getLatestAuthEntry(serverName, options) ?? {};
   if (serverUrl && entry.serverUrl !== serverUrl) {
     delete entry.tokens;
     delete entry.clientInfo;
@@ -1038,7 +1044,7 @@ export function getOAuthState(serverName: string, options?: AuthStorageOptions):
  * Clear OAuth state for a server.
  */
 export function clearOAuthState(serverName: string, options?: AuthStorageOptions): void {
-  const entry = getAuthEntry(serverName, options);
+  const entry = getLatestAuthEntry(serverName, options);
   if (entry) {
     delete entry.oauthState;
     saveAuthEntry(serverName, entry, undefined, options);
@@ -1075,7 +1081,7 @@ export function clearAllCredentials(serverName: string, options?: AuthStorageOpt
  * Clear only client info for a server.
  */
 export function clearClientInfo(serverName: string, options?: AuthStorageOptions): void {
-  const entry = getAuthEntry(serverName, options);
+  const entry = getLatestAuthEntry(serverName, options);
   if (entry) {
     delete entry.clientInfo;
     saveAuthEntry(serverName, entry, undefined, options);
@@ -1086,7 +1092,7 @@ export function clearClientInfo(serverName: string, options?: AuthStorageOptions
  * Clear only tokens for a server.
  */
 export function clearTokens(serverName: string, options?: AuthStorageOptions): void {
-  const entry = getAuthEntry(serverName, options);
+  const entry = getLatestAuthEntry(serverName, options);
   if (entry) {
     delete entry.tokens;
     saveAuthEntry(serverName, entry, undefined, options);

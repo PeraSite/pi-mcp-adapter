@@ -352,6 +352,30 @@ describe("mcp-auth", () => {
       assert.strictEqual(entry?.clientInfo?.clientSecret, "secret")
     })
 
+    it("preserves tokens rotated by another process when updating client info", () => {
+      const serverName = "cross-process-client-update"
+      const serverUrl = "https://api.example.com/mcp"
+      const options = { oauthDir: TEST_DIR, credentialStore: "file" as const }
+
+      saveAuthEntry(serverName, {
+        tokens: { accessToken: "stale-token", refreshToken: "stale-refresh" },
+        clientInfo: { clientId: "old-client" },
+      }, serverUrl, options)
+      getAuthEntry(serverName, options)
+      writeFileSync(getAuthEntryFilePath(serverName, options), JSON.stringify({
+        tokens: { accessToken: "rotated-token", refreshToken: "rotated-refresh" },
+        clientInfo: { clientId: "old-client" },
+        serverUrl,
+      }))
+
+      updateClientInfo(serverName, { clientId: "new-client" }, serverUrl, options)
+
+      const entry = getAuthEntry(serverName, options)
+      assert.strictEqual(entry?.tokens?.accessToken, "rotated-token")
+      assert.strictEqual(entry?.tokens?.refreshToken, "rotated-refresh")
+      assert.strictEqual(entry?.clientInfo?.clientId, "new-client")
+    })
+
     it("should clear URL-bound credentials when client info moves to a different server URL", () => {
       saveAuthEntry("url-change", {
         tokens: { accessToken: "old-token", refreshToken: "old-refresh" },
