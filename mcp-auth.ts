@@ -755,7 +755,7 @@ function writeSecureAuthEntryToStore(store: AuthSecretStore, serverName: string,
 }
 
 function publishAuthEntryToCache(serverName: string, payload: string, options?: AuthStorageOptions): void {
-  if (!isAuthEntryCacheEnabled()) return;
+  if (options?.credentialStore === 'file' || !isAuthEntryCacheEnabled()) return;
   const cacheKey = getAuthEntryCacheKey(serverName, options);
   // Cache the same normalized shape a fresh persistent-store read returns.
   authEntryCache.set(
@@ -817,9 +817,11 @@ function readAuthEntry(
   options?: AuthStorageOptions,
   behavior: { migrateLegacy?: boolean } = {},
 ): AuthEntry | undefined {
-  // Status-only reads deliberately bypass the cache because they do not
-  // migrate legacy entries.
-  const cacheable = behavior.migrateLegacy !== false && isAuthEntryCacheEnabled();
+  // Files are cheap to read and shared across Pi processes: caching them can
+  // replay a refresh token another process already rotated, or hide a login/logout.
+  // Status-only reads also bypass the cache because they do not migrate entries.
+  const cacheable = options?.credentialStore !== 'file'
+    && behavior.migrateLegacy !== false && isAuthEntryCacheEnabled();
   const cacheKey = getAuthEntryCacheKey(serverName, options);
   if (cacheable && authEntryCache.has(cacheKey)) {
     return cloneAuthEntry(authEntryCache.get(cacheKey));

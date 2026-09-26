@@ -244,7 +244,7 @@ Headless installations can explicitly choose file storage:
 
 File mode stores one compact JSON entry under `~/.pi/agent/mcp-oauth/sha256-<server-hash>/tokens.json`. `settings.oauthDir` or `MCP_OAUTH_DIR` can select another directory. Directories use mode `0700`, files use mode `0600`, and updates use atomic replacement. Files are not encrypted; this matches Pi's `auth.json` permission model and protects against other non-root users, not processes running as the same user or root.
 
-Complete credential entries are cached in memory for the Pi process lifetime. Authentication, refresh, and logout update the selected backend and cache immediately. Status-panel inspection bypasses the cache, while a credential-backed authentication failure invalidates it so an external change is observed on the next read. Set `PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1` to disable caching.
+File-backed entries are read from disk on every access so separate Pi processes observe token rotation, login, and logout immediately. Keyring entries are cached in memory for the Pi process lifetime; authentication, refresh, and logout update that cache immediately. Status-panel inspection bypasses it, while a credential-backed authentication failure invalidates it. Set `PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1` to disable keyring caching too.
 
 In keyring mode, older plaintext entries under the configured OAuth directory are imported once into the OS credential store and removed. In file mode, that same path remains the active persistent entry and is not migrated or deleted.
 
@@ -272,7 +272,7 @@ When an MCP server does not publish usable protected-resource metadata, configur
 
 Keyring storage remains the default and fail-closed behavior. File storage requires explicit configuration and never activates as an automatic fallback. Treat a file-backed credential as equivalent to any other user-readable CLI token: keep its parent directory private, exclude it from backups and source control unless those systems are trusted, and rotate it after suspected account compromise.
 
-Credential entries reside in process memory for the lifetime of the Pi process rather than being re-read per request. The process-memory copy is discarded on exit.
+Keyring entries remain cached in process memory until invalidation or exit. File-backed entries are re-read per access; both backends necessarily expose credentials to the running Pi process.
 
 ### URL Validation
 

@@ -681,19 +681,23 @@ export class McpOAuthProvider implements OAuthClientProvider {
         this.flowClientInfo = undefined
         invalidateAuthEntryCache(this.serverName)
         break
-      case "tokens":
-        // Invalidation is provider-local. Persistently deleting a shared token
-        // here lets a process refreshing stale cached credentials erase a token
-        // that another process just authorized. A later tokens() call bypasses
-        // the local cache and adopts a replacement token when one exists.
+      case "tokens": {
+        // Keep invalidation local: another process may have replaced the failed grant.
         this.invalidatedAccessToken = this.pendingAuthAccessToken ?? this.lastSavedAccessToken
         this.lastSavedAccessToken = undefined
         this.pendingAuthAccessToken = undefined
-        if (this.staleRedirectClientId !== undefined) {
+        invalidateAuthEntryCache(this.serverName)
+        const latest = getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
+        if (this.invalidatedAccessToken !== undefined
+          && latest?.tokens && latest.tokens.accessToken !== this.invalidatedAccessToken) {
+          // The SDK asks for clientInformation before tokens on retry. Adopt the
+          // replacement grant's client instead of registering an unrelated one.
+          this.flowClientInfo = undefined
+        } else if (this.staleRedirectClientId !== undefined) {
           this.invalidatedClientId = this.staleRedirectClientId
         }
-        invalidateAuthEntryCache(this.serverName)
         break
+      }
       case "verifier":
         clearCodeVerifier(this.serverName, this.storageOptions)
         break
